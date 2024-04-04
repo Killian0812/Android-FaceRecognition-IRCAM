@@ -21,6 +21,7 @@ import android.hardware.usb.UsbDevice;
 import android.media.Image;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
+import android.os.AsyncTask;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -78,6 +79,8 @@ import com.serenegiant.usb.UVCCamera;
 import com.serenegiant.usbcameracommon.UVCCameraHandler;
 import com.serenegiant.widget.CameraViewInterface;
 
+import org.json.JSONException;
+import org.json.JSONObject;
 import org.tensorflow.lite.Interpreter;
 
 import java.io.ByteArrayOutputStream;
@@ -92,6 +95,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.URISyntaxException;
 import java.net.URL;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -113,6 +117,8 @@ import java.util.concurrent.locks.ReentrantLock;
 
 import javax.net.ssl.HttpsURLConnection;
 
+import io.socket.client.Socket;
+import io.socket.emitter.Emitter;
 import okhttp3.*;
 
 public class MainActivity extends AppCompatActivity {
@@ -168,6 +174,10 @@ public class MainActivity extends AppCompatActivity {
     InputImage irInputImage = null;
     Bitmap rgbBitmap = null;
     Lock recognizingLock = new ReentrantLock();
+
+    private ClientSocket clientSocket;
+
+    public static Socket mSocket;
 
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
@@ -566,7 +576,50 @@ public class MainActivity extends AppCompatActivity {
 
         setupUVCCamera();
 
+        clientSocket = new ClientSocket(getMacAddress(getApplicationContext()));
+        initializeSocket();
     }
+
+    public void initializeSocket() {
+        mSocket = clientSocket.getSocket();
+        mSocket.connect();
+
+        mSocket.on("Allow", onEntryAllowed);
+
+        mSocket.on("Deny", onEntryDenied);
+    }
+
+    private Emitter.Listener onEntryAllowed = new Emitter.Listener() {
+        @Override
+        public void call(final Object... args) {
+            Log.w("CLIENTSOCKET", "onAllowed");
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    Toast t = Toast.makeText(getApplicationContext(), "Quản lý đã phê duyệt", Toast.LENGTH_LONG);
+                    t.setGravity(Gravity.CENTER, 50, 200);
+                    t.show();
+                }
+            });
+
+            OpenDoor();
+        }
+    };
+
+    private Emitter.Listener onEntryDenied = new Emitter.Listener() {
+        @Override
+        public void call(final Object... args) {
+            Log.w("CLIENTSOCKET", "onDenied");
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    Toast t = Toast.makeText(getApplicationContext(), "Quản lý đã từ chối", Toast.LENGTH_LONG);
+                    t.setGravity(Gravity.CENTER, 50, 200);
+                    t.show();
+                }
+            });
+        }
+    };
 
     @Override
     protected void onResume() {
@@ -611,6 +664,9 @@ public class MainActivity extends AppCompatActivity {
         }
         mUVCCameraViewR = null;
         mUVCCameraViewL = null;
+
+        mSocket.disconnect();
+
         super.onDestroy();
     }
 
@@ -841,9 +897,16 @@ public class MainActivity extends AppCompatActivity {
                                                             name.split("\\.")[0], Toast.LENGTH_LONG);
                                                     t.setGravity(Gravity.CENTER, 50, 200);
                                                     t.show();
-                                                    OpenDoor(rgbBitmap, name);
+                                                    UploadAndOpenDoor(rgbBitmap, name);
+                                                } else {
+                                                    for (int i = 0; i < 2; i++) {
+                                                        Toast t = Toast.makeText(getApplicationContext(),
+                                                                "Vui lòng đợi phê duyệt từ quản lý phòng.", Toast.LENGTH_LONG);
+                                                        t.setGravity(Gravity.CENTER, 50, 70);
+                                                        t.show();
+                                                    }
+                                                    RequestOpenDoor(rgbBitmap);
                                                 }
-
                                             }
                                         } catch (Exception e) {
                                             e.printStackTrace();
@@ -1037,12 +1100,11 @@ public class MainActivity extends AppCompatActivity {
 //                        t.show();
                     }
                 });
-//                Log.d("SCORE", "" + distance);
-                if (distance < 1.1f) //If distance between Closest found face is more than 1.000 ,then output UNKNOWN face.
-                {
-                    Log.d("SCORE", "" + distance);
+
+                Log.d("SCORE", "" + distance);
+                if (distance < 1.1f) //If distance between Closest found face is more than 1.100 ,then output UNKNOWN face.
                     return name;
-                } else
+                else
                     return "unknown";
             }
         }
@@ -1267,7 +1329,7 @@ public class MainActivity extends AppCompatActivity {
         return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength);
     }
 
-    public void OpenDoor(Bitmap cameraBM, String name) {
+    public void UploadAndOpenDoor(Bitmap cameraBM, String name) {
         try {
             isWorking = false;
             runOnUiThread(new Runnable() {
@@ -1309,7 +1371,7 @@ public class MainActivity extends AppCompatActivity {
                                             String macAddress = getMacAddress(getApplicationContext());
                                             Log.d("MAC ADDRESS", macAddress);
 
-                                            String url = "http://192.168.5.245:8080/guest/newEntry";
+                                            String url = "http://172.20.10.2:8080/guest/newEntry";
 
                                             // Create a client
                                             OkHttpClient client = new OkHttpClient();
@@ -1367,7 +1429,7 @@ public class MainActivity extends AppCompatActivity {
                                     btnCardDetection.setVisibility(View.VISIBLE);
                                     btnQRDetection.setVisibility(View.VISIBLE);
                                 }
-                            }, 5000);
+                            }, 6000);
                         }
                     } catch (Exception e) {
 
@@ -1375,6 +1437,123 @@ public class MainActivity extends AppCompatActivity {
                 }
             });
 
+            // open door
+            OpenDoor();
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    public void RequestOpenDoor(Bitmap cameraBM) {
+        try {
+            isWorking = false;
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        mHandlerL.mShowCamera = 0;
+                        mHandlerR.mShowCamera = 0;
+                        mHandlerL.changePreviewSetting();
+                        mHandlerR.changePreviewSetting();
+                        cameraLayout.setVisibility(View.INVISIBLE);
+                        imageViewSOICT.setVisibility(View.VISIBLE);
+                        imageViewResult.setImageBitmap(cameraBM);
+
+                        Thread uploadThread = new Thread(new Runnable() {
+                            @Override
+                            public void run() {
+                                Log.d("TEST", "Requesting");
+                                try {
+                                    if (System.currentTimeMillis() - lastUploadMillis > 5000) {
+                                        lastUploadMillis = System.currentTimeMillis();
+                                        ByteArrayOutputStream imageByteStream = new ByteArrayOutputStream();
+                                        cameraBM.compress(Bitmap.CompressFormat.JPEG, 70, imageByteStream);
+
+                                        byte[] imageData = imageByteStream.toByteArray();
+                                        imageByteStream.close();
+                                        File f = new File("/storage/emulated/0/Download/temp/TEMPFILE.JPEG");
+                                        try (FileOutputStream fos = new FileOutputStream(f)) {
+                                            fos.write(imageData);
+                                            Log.d("TEST WRITE", "Image written to file");
+                                        } catch (IOException e) {
+                                            Log.d("TEST WRITE ERR", "Image written to file failed" + e.getMessage());
+                                        }
+
+                                        String macAddress = getMacAddress(getApplicationContext());
+
+                                        String url = "http://192.168.5.201:8080/guest/requestEntry";
+
+                                        // Create a client
+                                        OkHttpClient client = new OkHttpClient();
+
+                                        // Create a multipart body builder
+                                        MultipartBody.Builder requestBodyBuilder = new MultipartBody.Builder()
+                                                .setType(MultipartBody.FORM)
+                                                .addFormDataPart("File", "TEMPFILE.JPEG",
+                                                        RequestBody.create(MediaType.parse("image/jpeg"), f))
+                                                .addFormDataPart("MAC", macAddress);
+
+                                        // Build the request body
+                                        RequestBody requestBody = requestBodyBuilder.build();
+
+                                        // Build the request
+                                        Request request = new Request.Builder()
+                                                .url(url)
+                                                .post(requestBody)
+                                                .build();
+
+                                        // Make the request asynchronously
+                                        client.newCall(request).enqueue(new Callback() {
+                                            @Override
+                                            public void onResponse(Call call, Response response) throws IOException {
+                                                if (response.isSuccessful()) {
+                                                    String responseBody = response.body().string();
+                                                    Log.d("UPLOADCAM", responseBody);
+                                                } else {
+                                                    Log.d("UPLOADCAM", "Upload failed");
+                                                }
+                                            }
+
+                                            @Override
+                                            public void onFailure(Call call, IOException e) {
+                                                Log.d("UPLOADCAM", "Upload failed");
+                                            }
+                                        });
+
+
+                                    }
+                                } catch (Exception e) {
+                                    e.printStackTrace();
+                                }
+                            }
+                        });
+                        uploadThread.start();
+
+                        Handler handler = new Handler();
+                        handler.postDelayed(new Runnable() {
+                            @Override
+                            public void run() {
+                                imageViewResult.setVisibility(View.INVISIBLE);
+                                btnFaceDetection.setVisibility(View.VISIBLE);
+                                btnCardDetection.setVisibility(View.VISIBLE);
+                                btnQRDetection.setVisibility(View.VISIBLE);
+                            }
+                        }, 5000);
+                    } catch (Exception e) {
+                    }
+                }
+
+
+            });
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    public void OpenDoor() {
+        try {
             FileOutputStream gpioStream = new FileOutputStream(new File("/sys/class/gpio/gpio63/value"));
             gpioStream.write(new byte[]{49});
             gpioStream.flush();
